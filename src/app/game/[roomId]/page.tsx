@@ -19,6 +19,7 @@ export default function GameRoomPage() {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'ended'>('connecting');
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
+  const [isRemoteCameraOn, setIsRemoteCameraOn] = useState(false);
   const [hasLocalStream, setHasLocalStream] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -29,6 +30,11 @@ export default function GameRoomPage() {
   const pendingOfferRef = useRef<RTCSessionDescriptionInit | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const requestOfferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isVideoEnabledRef = useRef(false);
+
+  useEffect(() => {
+    isVideoEnabledRef.current = isVideoEnabled;
+  }, [isVideoEnabled]);
 
   const cleanup = useCallback(() => {
     if (requestOfferTimerRef.current) {
@@ -57,7 +63,7 @@ export default function GameRoomPage() {
     channelRef.current = channel;
 
     channel.on('broadcast', { event: 'signaling' }, async (payload) => {
-      const msg = payload.payload as { from: string; type: string; sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
+      const msg = payload.payload as { from: string; type: string; sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit; enabled?: boolean };
       if (msg.from === sessionId) return;
 
       const pc = pcRef.current;
@@ -129,6 +135,29 @@ export default function GameRoomPage() {
             console.error('[ListenBuddy] 再送offerエラー:', e);
           }
         }
+      } else if (msg.type === 'camera-state' && typeof msg.enabled === 'boolean') {
+        setIsRemoteCameraOn(msg.enabled);
+      } else if (msg.type === 'request-camera-state') {
+        channel.send({
+          type: 'broadcast',
+          event: 'signaling',
+          payload: { from: sessionId, type: 'camera-state', enabled: isVideoEnabledRef.current },
+        });
+      } else if (msg.type === 'hangup') {
+        if (requestOfferTimerRef.current) {
+          clearTimeout(requestOfferTimerRef.current);
+          requestOfferTimerRef.current = null;
+        }
+        if (pcRef.current) {
+          pcRef.current.close();
+          pcRef.current = null;
+        }
+        localStreamRef.current?.getTracks().forEach((t) => t.stop());
+        localStreamRef.current = null;
+        supabase.removeChannel(channel);
+        channelRef.current = null;
+        setStatus('ended');
+        window.location.href = '/';
       }
     });
 
@@ -165,6 +194,11 @@ export default function GameRoomPage() {
           remoteVideoRef.current.srcObject = e.streams[0];
         }
         setStatus('connected');
+        channel.send({
+          type: 'broadcast',
+          event: 'signaling',
+          payload: { from: sessionId, type: 'request-camera-state' },
+        });
       };
 
       pc.onicecandidate = (e) => {
@@ -189,6 +223,12 @@ export default function GameRoomPage() {
         clearTimeout(requestOfferTimerRef.current);
         requestOfferTimerRef.current = null;
       }
+
+      channel.send({
+        type: 'broadcast',
+        event: 'signaling',
+        payload: { from: sessionId, type: 'camera-state', enabled: false },
+      });
 
       if (pendingOffer) {
         try {
@@ -272,6 +312,7 @@ export default function GameRoomPage() {
           )}
           {hasLocalStream && !isVideoEnabled && (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-400 bg-zinc-800 z-10">
+              <svg className="w-10 h-10 mb-2 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="1" y1="1" x2="23" y2="23"/><path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34m-7.72-2.06a4 4 0 1 1-5.56-5.56"/></svg>
               <span className="text-sm">カメラがオフです</span>
             </div>
           )}
@@ -283,7 +324,7 @@ export default function GameRoomPage() {
             ref={remoteVideoRef}
             autoPlay
             playsInline
-            className="w-full h-full object-contain bg-black"
+            className={`w-full h-full object-contain bg-black ${status === 'connected' && !isRemoteCameraOn ? 'invisible' : ''}`}
           />
           <div className="absolute top-2 left-2 px-2 py-1 rounded bg-black/60 text-white text-xs">
             相手
@@ -294,26 +335,37 @@ export default function GameRoomPage() {
               <span className="text-xs mt-1">接続待機中...</span>
             </div>
           )}
+          {status === 'connected' && !isRemoteCameraOn && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-400 bg-zinc-800 z-10">
+              <svg className="w-10 h-10 mb-2 opacity-60" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="1" y1="1" x2="23" y2="23"/><path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34m-7.72-2.06a4 4 0 1 1-5.56-5.56"/></svg>
+              <span className="text-sm">カメラがオフです</span>
+            </div>
+          )}
         </div>
       </div>
 
       {/* コントロールバー */}
       <div className="flex items-center justify-center gap-4 p-4 bg-zinc-800">
-        {/* カメラ（BuddyShareと同様：オフ時はカメラオフアイコン） */}
+        {/* カメラ（BuddyShareと同様：オフ時はFiCameraOffで統一） */}
         <button
           type="button"
           onClick={() => {
             const next = !isVideoEnabled;
             setIsVideoEnabled(next);
             localStreamRef.current?.getVideoTracks().forEach((t) => { t.enabled = next; });
+            channelRef.current?.send({
+              type: 'broadcast',
+              event: 'signaling',
+              payload: { from: sessionId, type: 'camera-state', enabled: next },
+            });
           }}
           className={`rounded-full w-12 h-12 flex items-center justify-center text-white ${isVideoEnabled ? 'bg-blue-500 hover:bg-blue-600' : 'bg-zinc-600 hover:bg-zinc-500'}`}
           title={isVideoEnabled ? 'カメラをオフ' : 'カメラをオン'}
         >
           {isVideoEnabled ? (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
           ) : (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24"><line x1="1" y1="1" x2="23" y2="23"/><path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34m-7.72-2.06a4 4 0 1 1-5.56-5.56"/></svg>
           )}
         </button>
         {/* マイク（BuddyShareと同様：オフ時はマイクオフアイコン） */}
@@ -335,7 +387,13 @@ export default function GameRoomPage() {
         </button>
         <button
           type="button"
-          onClick={() => {
+          onClick={async () => {
+            channelRef.current?.send({
+              type: 'broadcast',
+              event: 'signaling',
+              payload: { from: sessionId, type: 'hangup' },
+            });
+            await new Promise((r) => setTimeout(r, 100));
             cleanup();
             router.push('/');
           }}
