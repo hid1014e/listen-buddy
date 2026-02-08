@@ -13,6 +13,9 @@ export default function Home() {
         <p className="text-zinc-600 dark:text-zinc-400">
           傾聴ゲームで聞く力を磨こう
         </p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-500 -mt-4">
+          マッチング後、ランダム相手とのテレビ通話が始まります
+        </p>
         <Link
           href="/game"
           className="rounded-full bg-zinc-900 px-8 py-3 text-lg font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
