@@ -4,6 +4,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
+import { getQuestionForRoom } from '@/lib/listening-questions';
+
+const TALKING_SECONDS = 3 * 60;
+const SUMMARY_SECONDS = 1 * 60;
 
 export default function GameRoomPage() {
   const params = useParams();
@@ -21,6 +25,9 @@ export default function GameRoomPage() {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [isRemoteCameraOn, setIsRemoteCameraOn] = useState(false);
   const [hasLocalStream, setHasLocalStream] = useState(false);
+  const [gamePhase, setGamePhase] = useState<'talking' | 'summary' | 'done'>('talking');
+  const [timeRemaining, setTimeRemaining] = useState(TALKING_SECONDS);
+  const questionText = getQuestionForRoom(roomId);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -31,10 +38,51 @@ export default function GameRoomPage() {
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const requestOfferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isVideoEnabledRef = useRef(false);
+  const gameStartedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     isVideoEnabledRef.current = isVideoEnabled;
   }, [isVideoEnabled]);
+
+  // 3分→1分タイマー（game-start受信で開始、initiatorはontrackで開始）
+  const gamePhaseRef = useRef(gamePhase);
+  gamePhaseRef.current = gamePhase;
+  useEffect(() => {
+    if (status !== 'connected') return;
+    const interval = setInterval(() => {
+      const startedAt = gameStartedAtRef.current;
+      if (startedAt) {
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        if (elapsed < TALKING_SECONDS) {
+          setGamePhase('talking');
+          setTimeRemaining(TALKING_SECONDS - elapsed);
+        } else if (elapsed < TALKING_SECONDS + SUMMARY_SECONDS) {
+          setGamePhase('summary');
+          setTimeRemaining(TALKING_SECONDS + SUMMARY_SECONDS - elapsed);
+        } else {
+          setGamePhase('done');
+          setTimeRemaining(0);
+        }
+      } else {
+        setTimeRemaining((prev) => {
+          if (prev <= 1) {
+            const phase = gamePhaseRef.current;
+            if (phase === 'talking') {
+              setGamePhase('summary');
+              return SUMMARY_SECONDS;
+            }
+            if (phase === 'summary') {
+              setGamePhase('done');
+              return 0;
+            }
+            return 0;
+          }
+          return prev - 1;
+        });
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [status]);
 
   const cleanup = useCallback(() => {
     if (requestOfferTimerRef.current) {
@@ -63,7 +111,7 @@ export default function GameRoomPage() {
     channelRef.current = channel;
 
     channel.on('broadcast', { event: 'signaling' }, async (payload) => {
-      const msg = payload.payload as { from: string; type: string; sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit; enabled?: boolean };
+      const msg = payload.payload as { from: string; type: string; sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit; enabled?: boolean; startedAt?: number };
       if (msg.from === sessionId) return;
 
       const pc = pcRef.current;
@@ -135,6 +183,8 @@ export default function GameRoomPage() {
             console.error('[ListenBuddy] 再送offerエラー:', e);
           }
         }
+      } else if (msg.type === 'game-start' && typeof msg.startedAt === 'number') {
+        gameStartedAtRef.current = msg.startedAt;
       } else if (msg.type === 'camera-state' && typeof msg.enabled === 'boolean') {
         setIsRemoteCameraOn(msg.enabled);
       } else if (msg.type === 'request-camera-state') {
@@ -194,6 +244,17 @@ export default function GameRoomPage() {
           remoteVideoRef.current.srcObject = e.streams[0];
         }
         setStatus('connected');
+        const startedAt = Date.now();
+        gameStartedAtRef.current = startedAt;
+        if (isInitiator) {
+          channel.send({
+            type: 'broadcast',
+            event: 'signaling',
+            payload: { from: sessionId, type: 'game-start', startedAt },
+          });
+        }
+        setGamePhase('talking');
+        setTimeRemaining(TALKING_SECONDS);
         channel.send({
           type: 'broadcast',
           event: 'signaling',
@@ -280,15 +341,106 @@ export default function GameRoomPage() {
       {/* ヘッダー */}
       <header className="flex items-center justify-between px-4 py-3 bg-zinc-800 text-white">
         <h1 className="text-lg font-bold">傾聴ゲーム</h1>
-        <span className="text-sm text-zinc-300 flex-1 text-center">
+        <span className="text-sm text-zinc-300 flex-1 text-center flex items-center justify-center gap-2">
           {status === 'connecting' && '接続中...'}
-          {status === 'connected' && '通話中'}
+          {status === 'connected' && (
+            <>
+              {gamePhase === 'talking' && (
+                <span className="font-mono bg-zinc-700 px-2 py-0.5 rounded">
+                  残り {Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}
+                </span>
+              )}
+              {gamePhase === 'summary' && (
+                <span className="font-mono bg-amber-600 px-2 py-0.5 rounded">
+                  要約 {Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}
+                </span>
+              )}
+              {gamePhase === 'done' && '完了'}
+              {gamePhase !== 'done' && '通話中'}
+            </>
+          )}
           {status === 'ended' && '終了'}
         </span>
-        <Link href="/" className="text-sm text-zinc-400 hover:text-white min-w-[80px] text-right">
+        <button
+          type="button"
+          onClick={async () => {
+            channelRef.current?.send({
+              type: 'broadcast',
+              event: 'signaling',
+              payload: { from: sessionId, type: 'hangup' },
+            });
+            await new Promise((r) => setTimeout(r, 100));
+            cleanup();
+            router.push('/');
+          }}
+          className="text-sm text-zinc-400 hover:text-white min-w-[80px] text-right"
+        >
           トップに戻る
-        </Link>
+        </button>
       </header>
+
+      {/* 質問カード（通話中・要約中のみ） */}
+      {status === 'connected' && (gamePhase === 'talking' || gamePhase === 'summary') && (
+        <div className="absolute top-14 left-4 right-4 z-20 pointer-events-none">
+          <div className={`max-w-md mx-auto p-4 rounded-xl shadow-lg ${
+            gamePhase === 'talking'
+              ? 'bg-gradient-to-br from-violet-600 to-purple-700 text-white'
+              : 'bg-gradient-to-br from-amber-600 to-orange-600 text-white'
+          }`}>
+            <p className="text-xs font-medium opacity-90 mb-1">
+              {gamePhase === 'talking' ? '📌 この質問で聞いてみよう' : '📝 1分で要約する時間'}
+            </p>
+            <p className="text-base font-bold">
+              {gamePhase === 'talking' ? questionText : '相手の話を1分で要約して伝えましょう'}
+            </p>
+            <p className="text-xs opacity-80 mt-2">
+              {gamePhase === 'talking'
+                ? '（3分経過後、自動で要約フェーズに切り替わります）'
+                : '（1分経つと自動で終了します）'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* 完了メッセージ（案A: BuddyShare誘導） */}
+      {status === 'connected' && gamePhase === 'done' && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-zinc-800 rounded-2xl p-8 max-w-sm text-center text-white">
+            <p className="text-2xl font-bold mb-2">お疲れ様でした！</p>
+            <p className="text-sm text-zinc-400 mb-6">今日の傾聴セッション、お疲れ様でした</p>
+            <p className="text-sm text-zinc-300 mb-6">
+              体験をさらに深めるなら、BuddyShare で本格的なバディを始めませんか？
+            </p>
+            <div className="flex flex-col gap-3">
+              <a
+                href="https://myapp-hides-projects-19f80db4.vercel.app"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-full bg-violet-600 hover:bg-violet-500 px-6 py-3 text-white font-medium transition-colors"
+              >
+                BuddyShare の7日間お試しへ
+              </a>
+              <p className="text-xs text-zinc-500 mt-1">サイトパスワード: catcat</p>
+              <button
+                type="button"
+                onClick={async () => {
+                  channelRef.current?.send({
+                    type: 'broadcast',
+                    event: 'signaling',
+                    payload: { from: sessionId, type: 'hangup' },
+                  });
+                  await new Promise((r) => setTimeout(r, 100));
+                  cleanup();
+                  router.push('/');
+                }}
+                className="rounded-full bg-zinc-600 hover:bg-zinc-500 px-6 py-2 text-white font-medium"
+              >
+                トップに戻る
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ビデオエリア（左右2分割・BuddyShare風） */}
       <div className="flex-1 grid grid-cols-2 gap-4 p-4 min-h-0">

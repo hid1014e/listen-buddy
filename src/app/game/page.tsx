@@ -64,11 +64,6 @@ export default function GamePage() {
         {status === 'connecting' && '接続中...'}
         {status === 'error' && errorMsg}
       </p>
-      <p className="text-xs text-zinc-400 max-w-xs text-center">
-        2人目は「新しいタブ」または「シークレットモード」で開いてください。
-        <br />
-        <span className="font-mono text-zinc-500">ID: {sessionIdRef.current.slice(0, 8)}...</span>
-      </p>
       <Link
         href="/"
         className="text-zinc-600 underline hover:text-zinc-900 dark:hover:text-zinc-100"
